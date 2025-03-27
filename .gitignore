@@ -50,3 +50,4 @@ config.py  # If you have a config file with sensitive info
 server.key
 server.crt
 
+node_modules
