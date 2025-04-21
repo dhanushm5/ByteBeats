@@ -9,10 +9,16 @@ import sys
 import signal
 import websocket
 import struct
+import ssl
 
 # Server configuration
 HOST = input("Enter server IP address on the mobile hotspot: ")  # Allow user to input server address
-PORT = 8080  # Must match the server port
+PORT = input("Enter server port (default: 8443 for secure, 8080 for non-secure): ") or "8443"  # Allow user to input port
+PORT = int(PORT)
+
+# Ask if user wants to use secure connection
+use_secure = input("Use secure connection? (Y/n): ").lower() != 'n'
+ws_protocol = "wss://" if use_secure else "ws://"
 
 # Global variables for playback control
 player_process = None
@@ -23,13 +29,20 @@ stop_playback = False
 
 # Connect to the server
 def connect_to_server():
-    # Create a WebSocket connection without SSL
-    ws_url = f"ws://{HOST}:{PORT}"
+    # Create a WebSocket connection
+    ws_url = f"{ws_protocol}{HOST}:{PORT}"
     print(f"Connecting to {ws_url}...")
     
     # Use the websocket-client library for better WebSocket support
     try:
-        client_socket = websocket.create_connection(ws_url)
+        # If using secure connection but with self-signed certificate, we need to disable cert verification
+        if use_secure:
+            client_socket = websocket.create_connection(
+                ws_url, 
+                sslopt={"cert_reqs": ssl.CERT_NONE}
+            )
+        else:
+            client_socket = websocket.create_connection(ws_url)
         print("Connected to server")
         return client_socket
     except Exception as e:

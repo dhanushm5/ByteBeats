@@ -26,6 +26,7 @@ function App() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [useSSL, setUseSSL] = useState(true); // Default to using SSL
+  const [pendingCredentials, setPendingCredentials] = useState<{username: string, password: string} | null>(null);
   
   // Add this ref to store chunks
   const chunksRef = useRef<Uint8Array[]>([]);
@@ -41,12 +42,17 @@ function App() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Add flag to track initial authentication
+  const [initialAuthDone, setInitialAuthDone] = useState(false);
+
   useEffect(() => {
-    // Don't auto-connect, wait for user to enter server address and credentials
-    if (isAuthenticated) {
+    // Only connect if authenticated and not already connected
+    if (isAuthenticated && !initialAuthDone && !isConnected) {
+      console.log('Initial authentication completed, connecting...');
       connectToServer();
+      setInitialAuthDone(true);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, initialAuthDone, isConnected]);
 
   const connectToServer = () => {
     try {
@@ -57,6 +63,8 @@ function App() {
       const protocol = useSSL ? 'wss://' : 'ws://';
       const port = useSSL ? '8443' : '8080'; // Use different ports for secure vs non-secure
       
+      console.log(`Attempting to connect to ${protocol}${serverAddress}:${port}`);
+      
       // Use serverAddress state to build the WebSocket URL
       const ws = new WebSocket(`${protocol}${serverAddress}:${port}`);
       
@@ -64,6 +72,13 @@ function App() {
         setIsConnected(true);
         setIsReconnecting(false);
         console.log(`Connected to server at ${protocol}${serverAddress}:${port}`);
+        
+        // If we have pending credentials, send them now that the connection is open
+        if (pendingCredentials) {
+          console.log('Sending credentials now that connection is established');
+          ws.send(`${pendingCredentials.username}:${pendingCredentials.password}`);
+          setPendingCredentials(null);
+        }
       };
 
       ws.onmessage = (event) => {
@@ -270,17 +285,16 @@ function App() {
   const handleAuth = (e: React.FormEvent) => {
     e.preventDefault();
     
-    // Connect to the server first
+    // Store the credentials to be sent when the connection is established
+    setPendingCredentials({
+      username: credentials.username,
+      password: credentials.password
+    });
+    
+    // Connect to the server
     connectToServer();
     
-    // Wait for connection before sending credentials
-    setTimeout(() => {
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(`${credentials.username}:${credentials.password}`);
-      } else {
-        console.error('Socket not ready when trying to authenticate');
-      }
-    }, 1000);
+    // The credentials will be sent in the onopen handler once the connection is established
   };
 
   const handlePlaySong = (song: Song) => {
@@ -384,7 +398,7 @@ function App() {
                 type="text"
                 value={serverAddress}
                 onChange={(e) => setServerAddress(e.target.value)}
-                placeholder="IP address (e.g. 172.20.10.9)"
+                placeholder="IP address (e.g. 192.168.1.5)"
                 className="w-full px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-white focus:outline-none focus:border-purple-500"
               />
               <p className="text-purple-300 text-xs mt-1">Use your server's IP address on the network</p>

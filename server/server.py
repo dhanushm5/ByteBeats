@@ -27,10 +27,43 @@ CERT_FILE = os.path.join(CERT_DIR, "server.crt")
 KEY_FILE = os.path.join(CERT_DIR, "server.key")
 
 # Simple user database - in production, use a proper database
-USERS = {
-    "user1": hashlib.sha256("password1".encode()).hexdigest(),
-    "user2": hashlib.sha256("password2".encode()).hexdigest()
-}
+# Try to load users from config file, or use defaults if file doesn't exist
+try:
+    import json
+    user_config_path = os.path.join(BASE_DIR, "user_config.json")
+    
+    if os.path.exists(user_config_path):
+        with open(user_config_path, 'r') as f:
+            user_data = json.load(f)
+            USERS = {u['username']: u['password_hash'] for u in user_data['users']}
+            print(f"Loaded {len(USERS)} users from configuration file")
+    else:
+        # Default users for testing
+        USERS = {
+            "user1": hashlib.sha256("password1".encode()).hexdigest(),
+            "user2": hashlib.sha256("password2".encode()).hexdigest()
+        }
+        
+        # Create example user config file
+        example_config = {
+            "users": [
+                {"username": "user1", "password_hash": hashlib.sha256("password1".encode()).hexdigest()},
+                {"username": "user2", "password_hash": hashlib.sha256("password2".encode()).hexdigest()}
+            ]
+        }
+        
+        with open(user_config_path + ".example", 'w') as f:
+            json.dump(example_config, f, indent=2)
+            print(f"Created example user configuration file at {user_config_path}.example")
+            print("Rename this file to user_config.json and modify with your own users")
+            
+except Exception as e:
+    print(f"Error loading user configuration: {e}")
+    # Fall back to default users
+    USERS = {
+        "user1": hashlib.sha256("password1".encode()).hexdigest(),
+        "user2": hashlib.sha256("password2".encode()).hexdigest()
+    }
 
 # WebSocket constants
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -372,6 +405,7 @@ def start_server():
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
         # Apply SSL if enabled
+        global USE_SSL
         if USE_SSL:
             ssl_context = create_ssl_context()
             if ssl_context is None:
