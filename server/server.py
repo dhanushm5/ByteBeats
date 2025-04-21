@@ -15,12 +15,16 @@ import time
 
 # Server configuration
 HOST = '0.0.0.0'  # Listen on all available network interfaces
-PORT = 8080       # Choose a port that's likely to be open on firewalls
+PORT = 8443       # Standard secure WebSocket port (changed from 8080)
+USE_SSL = True    # Enable SSL/TLS
 
 # Get absolute path for music directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
 MUSIC_DIR = os.path.join(PROJECT_DIR, 'music')  # Directory containing audio files
+CERT_DIR = os.path.join(BASE_DIR, "certs")
+CERT_FILE = os.path.join(CERT_DIR, "server.crt")
+KEY_FILE = os.path.join(CERT_DIR, "server.key")
 
 # Simple user database - in production, use a proper database
 USERS = {
@@ -30,6 +34,45 @@ USERS = {
 
 # WebSocket constants
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# Create SSL context
+def create_ssl_context():
+    # Generate certificates if they don't exist
+    if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
+        try:
+            from generate_cert import generate_self_signed_cert
+            generate_self_signed_cert(CERT_DIR)
+        except ImportError:
+            print("Error importing generate_cert module. Make sure PyOpenSSL is installed.")
+            print("Run: pip install pyopenssl")
+            return None
+        except Exception as e:
+            print(f"Error generating certificates: {e}")
+            return None
+    
+    try:
+        # Create SSL context
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+        
+        # Set secure protocols and ciphers
+        context.options |= ssl.OP_NO_SSLv2
+        context.options |= ssl.OP_NO_SSLv3
+        context.options |= ssl.OP_NO_TLSv1
+        context.options |= ssl.OP_NO_TLSv1_1
+        
+        # Prefer server's cipher selection
+        context.options |= ssl.OP_CIPHER_SERVER_PREFERENCE
+        
+        # Print SSL configuration
+        print(f"SSL configuration:")
+        print(f" - Certificate: {CERT_FILE}")
+        print(f" - Private key: {KEY_FILE}")
+        
+        return context
+    except Exception as e:
+        print(f"Error creating SSL context: {e}")
+        return None
 
 # Create a list of available songs
 def get_song_list():
@@ -327,9 +370,21 @@ def handle_client(conn, addr):
 def start_server():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Apply SSL if enabled
+        if USE_SSL:
+            ssl_context = create_ssl_context()
+            if ssl_context is None:
+                print("Failed to create SSL context. Starting server without SSL.")
+                USE_SSL = False
+            else:
+                server_socket = ssl_context.wrap_socket(server_socket, server_side=True)
+                print(f"SSL enabled. Server will use secure WebSockets (wss://)")
+        
         server_socket.bind((HOST, PORT))
         server_socket.listen(5)
-        print(f"Server listening on {HOST}:{PORT}")
+        protocol = "wss://" if USE_SSL else "ws://"
+        print(f"Server listening on {protocol}{HOST}:{PORT}")
         
         while True:
             try:
@@ -346,12 +401,18 @@ def start_server():
 def start_http_redirect():
     class RedirectHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
+            protocol = "https" if USE_SSL else "http"
             self.send_response(301)
-            self.send_header('Location', f'http://{self.headers["Host"]}{self.path}')
+            self.send_header('Location', f'{protocol}://{self.headers["Host"]}:{PORT}{self.path}')
             self.end_headers()
 
-    httpd = http.server.HTTPServer((HOST, 80), RedirectHandler)
-    httpd.serve_forever()
+    try:
+        redirect_port = 80
+        httpd = http.server.HTTPServer((HOST, redirect_port), RedirectHandler)
+        print(f"HTTP redirect server started on port {redirect_port}")
+        httpd.serve_forever()
+    except Exception as e:
+        print(f"Error starting HTTP redirect: {e}")
 
 # Start the HTTP redirect in a separate thread
 try:

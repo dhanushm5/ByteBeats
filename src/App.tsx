@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, SkipForward, Volume2, Music2, Loader2 } from 'lucide-react';
+import { Play, Pause, SkipForward, Volume2, Music2, Loader2, Settings, RefreshCw, Shield } from 'lucide-react';
 
 interface Song {
   name: string;
@@ -15,13 +15,18 @@ function App() {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [credentials, setCredentials] = useState({ username: '', password: '' });
+  const [serverAddress, setServerAddress] = useState('localhost');
   const [audioBuffer, setAudioBuffer] = useState<ArrayBuffer | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [audioPlayer, setAudioPlayer] = useState<HTMLAudioElement | null>(null);
   const [receivedChunks, setReceivedChunks] = useState<Uint8Array[]>([]);
   const [receivingAudio, setReceivingAudio] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-
+  const [showSettings, setShowSettings] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [useSSL, setUseSSL] = useState(true); // Default to using SSL
+  
   // Add this ref to store chunks
   const chunksRef = useRef<Uint8Array[]>([]);
 
@@ -37,148 +42,172 @@ function App() {
   };
 
   useEffect(() => {
-    const connectToServer = () => {
-      try {
-        // Use the correct WebSocket URL format for secure connections
-        const ws = new WebSocket('ws://localhost:8080');
-        
-        ws.onopen = () => {
-          setIsConnected(true);
-          console.log('Connected to server');
-        };
+    // Don't auto-connect, wait for user to enter server address and credentials
+    if (isAuthenticated) {
+      connectToServer();
+    }
+  }, [isAuthenticated]);
 
-        ws.onmessage = (event) => {
-          // If it's binary data (song chunks)
-          if (event.data instanceof Blob) {
-            console.log(`Received chunk of size: ${event.data.size} bytes`);
-            event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
-              const chunk = new Uint8Array(buffer);
-              // Use ref for immediately available data
-              chunksRef.current = [...chunksRef.current, chunk];
-              // Also update state for component updates
-              setReceivedChunks(prev => [...prev, chunk]);
-            });
-            return;
-          }
-          
-          // Try to parse as JSON
-          try {
-            const data = JSON.parse(event.data);
-            console.log('Received message:', data);
-            if (data.type === 'AUTH_REQUIRED') {
-              setIsAuthenticated(false);
-            } else if (data.type === 'AUTH_SUCCESS') {
-              setIsAuthenticated(true);
-              setSongs(data.songs.map((name: string) => ({ name, duration: '00:00' })));
-            } else if (data.type === 'SONG_LIST') {
-              setSongs(data.songs.map((name: string) => ({ name, duration: '00:00' })));
-            } else if (data.type === 'SONG_PLAYING') {
-              // Clear previous audio data
-              chunksRef.current = [];
-              setReceivedChunks([]);
-              setReceivingAudio(true);
-              console.log(`Started receiving song: ${data.name}`);
-            } else if (data.type === 'SONG_METADATA') {
-              console.log(`Song metadata: ${data.name}, size: ${data.size} bytes`);
-            } else if (data.type === 'SONG_ENDED') {
-              setReceivingAudio(false);
-              console.log(`Finished receiving song. Total chunks: ${chunksRef.current.length}`);
+  const connectToServer = () => {
+    try {
+      setConnectionError(null);
+      setIsReconnecting(true);
+      
+      // Use secure WebSocket protocol (wss://) if useSSL is true, otherwise use ws://
+      const protocol = useSSL ? 'wss://' : 'ws://';
+      const port = useSSL ? '8443' : '8080'; // Use different ports for secure vs non-secure
+      
+      // Use serverAddress state to build the WebSocket URL
+      const ws = new WebSocket(`${protocol}${serverAddress}:${port}`);
+      
+      ws.onopen = () => {
+        setIsConnected(true);
+        setIsReconnecting(false);
+        console.log(`Connected to server at ${protocol}${serverAddress}:${port}`);
+      };
+
+      ws.onmessage = (event) => {
+        // If it's binary data (song chunks)
+        if (event.data instanceof Blob) {
+          console.log(`Received chunk of size: ${event.data.size} bytes`);
+          event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
+            const chunk = new Uint8Array(buffer);
+            // Use ref for immediately available data
+            chunksRef.current = [...chunksRef.current, chunk];
+            // Also update state for component updates
+            setReceivedChunks(prev => [...prev, chunk]);
+          });
+          return;
+        }
+        
+        // Try to parse as JSON
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Received message:', data);
+          if (data.type === 'AUTH_REQUIRED') {
+            setIsAuthenticated(false);
+          } else if (data.type === 'AUTH_SUCCESS') {
+            setIsAuthenticated(true);
+            setSongs(data.songs.map((name: string) => ({ name, duration: '00:00' })));
+          } else if (data.type === 'SONG_LIST') {
+            setSongs(data.songs.map((name: string) => ({ name, duration: '00:00' })));
+          } else if (data.type === 'SONG_PLAYING') {
+            // Clear previous audio data
+            chunksRef.current = [];
+            setReceivedChunks([]);
+            setReceivingAudio(true);
+            setIsLoading(true);
+            console.log(`Started receiving song: ${data.name}`);
+          } else if (data.type === 'SONG_METADATA') {
+            console.log(`Song metadata: ${data.name}, size: ${data.size} bytes`);
+          } else if (data.type === 'SONG_ENDED') {
+            setReceivingAudio(false);
+            setIsLoading(false);
+            console.log(`Finished receiving song. Total chunks: ${chunksRef.current.length}`);
+            
+            // Use the ref directly to access all chunks immediately
+            if (chunksRef.current.length > 0) {
+              const totalLength = chunksRef.current.reduce((acc, chunk) => acc + chunk.length, 0);
+              console.log(`Creating audio from ${totalLength} bytes`);
               
-              // Use the ref directly to access all chunks immediately
-              if (chunksRef.current.length > 0) {
-                const totalLength = chunksRef.current.reduce((acc, chunk) => acc + chunk.length, 0);
-                console.log(`Creating audio from ${totalLength} bytes`);
-                
-                const audioData = new Uint8Array(totalLength);
-                let offset = 0;
-                for (const chunk of chunksRef.current) {
-                  audioData.set(chunk, offset);
-                  offset += chunk.length;
-                }
-                
-                const blob = new Blob([audioData], { type: 'audio/mp3' });
-                const url = URL.createObjectURL(blob);
-                
-                if (audioPlayer) {
-                  try {
-                    // Log audio player state
-                    console.log('Audio player before loading:', audioPlayer.readyState);
+              const audioData = new Uint8Array(totalLength);
+              let offset = 0;
+              for (const chunk of chunksRef.current) {
+                audioData.set(chunk, offset);
+                offset += chunk.length;
+              }
+              
+              const blob = new Blob([audioData], { type: 'audio/mp3' });
+              const url = URL.createObjectURL(blob);
+              
+              if (audioPlayer) {
+                try {
+                  // Log audio player state
+                  console.log('Audio player before loading:', audioPlayer.readyState);
+                  
+                  // Clean up previous URL
+                  if (audioPlayer.src) URL.revokeObjectURL(audioPlayer.src);
+                  
+                  console.log('Setting audio source to:', url);
+                  audioPlayer.src = url;
+                  
+                  // Set oncanplaythrough before trying to play
+                  audioPlayer.oncanplaythrough = () => {
+                    console.log('Audio can play through, attempting playback');
                     
-                    // Clean up previous URL
-                    if (audioPlayer.src) URL.revokeObjectURL(audioPlayer.src);
+                    // Attempt to play with explicit user interaction handling
+                    const playPromise = audioPlayer.play();
                     
-                    console.log('Setting audio source to:', url);
-                    audioPlayer.src = url;
-                    
-                    // Set oncanplaythrough before trying to play
-                    audioPlayer.oncanplaythrough = () => {
-                      console.log('Audio can play through, attempting playback');
-                      
-                      // Attempt to play with explicit user interaction handling
-                      const playPromise = audioPlayer.play();
-                      
-                      if (playPromise !== undefined) {
-                        playPromise
-                          .then(() => {
-                            console.log('Audio playing successfully');
-                            setIsPlaying(true);
-                          })
-                          .catch(err => {
-                            console.error('Error playing audio:', err);
-                            // Try a different approach if autoplay fails
-                            if (err.name === 'NotAllowedError') {
-                              console.log('Autoplay not allowed, require user interaction');
-                              // Update UI to show play button
-                              setIsPlaying(false);
-                            }
-                          });
-                      }
-                    };
-                    
-                    // Add loading and error handlers
-                    audioPlayer.onloadeddata = () => console.log('Audio data loaded');
-                    audioPlayer.onerror = (e) => console.error('Audio player error:', e);
-                  } catch (err) {
-                    console.error('Error setting up audio player:', err);
-                  }
-                } else {
-                  console.error('No audio player available');
+                    if (playPromise !== undefined) {
+                      playPromise
+                        .then(() => {
+                          console.log('Audio playing successfully');
+                          setIsPlaying(true);
+                        })
+                        .catch(err => {
+                          console.error('Error playing audio:', err);
+                          // Try a different approach if autoplay fails
+                          if (err.name === 'NotAllowedError') {
+                            console.log('Autoplay not allowed, require user interaction');
+                            // Update UI to show play button
+                            setIsPlaying(false);
+                          }
+                        });
+                    }
+                  };
+                  
+                  // Add loading and error handlers
+                  audioPlayer.onloadeddata = () => console.log('Audio data loaded');
+                  audioPlayer.onerror = (e) => console.error('Audio player error:', e);
+                } catch (err) {
+                  console.error('Error setting up audio player:', err);
                 }
               } else {
-                console.error('No chunks received for the song');
+                console.error('No audio player available');
               }
-            } else if (data.type === 'STREAM_ERROR') {
-              console.error('Stream error:', data.error);
-              setReceivingAudio(false);
+            } else {
+              console.error('No chunks received for the song');
             }
-          } catch (e) {
-            console.error('Error parsing message:', e);
+          } else if (data.type === 'STREAM_ERROR') {
+            console.error('Stream error:', data.error);
+            setReceivingAudio(false);
+            setIsLoading(false);
           }
-        };
+        } catch (e) {
+          console.error('Error parsing message:', e);
+        }
+      };
 
-        ws.onclose = () => {
-          setIsConnected(false);
-          setIsAuthenticated(false);
-          setTimeout(connectToServer, 5000); // Reconnect after 5 seconds
-        };
+      ws.onclose = () => {
+        setIsConnected(false);
+        setIsReconnecting(false);
+        // Don't auto reconnect or reset authentication
+        console.log('Connection closed');
+      };
 
-        setSocket(ws);
-      } catch (error) {
-        console.error('Connection error:', error);
-        setTimeout(connectToServer, 5000);
-      }
-    };
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        const protocol = useSSL ? 'wss://' : 'ws://';
+        const port = useSSL ? '8443' : '8080';
+        setConnectionError(
+          `Connection failed. Make sure the server is running and accessible at ${protocol}${serverAddress}:${port}. ${
+            useSSL ? 'If using a self-signed certificate, you may need to visit https://' + serverAddress + ':' + port + ' first to accept it.' : ''
+          }`
+        );
+        setIsReconnecting(false);
+        setIsConnected(false);
+      };
 
-    connectToServer();
-
-    // This is the return from the useEffect
-    return () => {
-      if (socket) {
-        socket.close();
-      }
-    };
-  // The dependency array should NOT include receivedChunks to avoid reconnection loops
-  }, [audioPlayer, audioContext]);
+      setSocket(ws);
+    } catch (error) {
+      console.error('Connection error:', error);
+      const protocol = useSSL ? 'wss://' : 'ws://';
+      const port = useSSL ? '8443' : '8080';
+      setConnectionError(`Failed to connect to ${protocol}${serverAddress}:${port}. Check the server address and try again.`);
+      setIsReconnecting(false);
+      setIsConnected(false);
+    }
+  };
 
   // Initialize audio player in a separate effect
   useEffect(() => {
@@ -194,7 +223,10 @@ function App() {
       player.addEventListener('loadstart', () => console.log('Audio load started'));
       player.addEventListener('loadeddata', () => console.log('Audio data loaded'));
       player.addEventListener('canplay', () => console.log('Audio can play'));
-      player.addEventListener('playing', () => console.log('Audio playing'));
+      player.addEventListener('playing', () => {
+        console.log('Audio playing');
+        setIsLoading(false);
+      });
       player.addEventListener('pause', () => console.log('Audio paused'));
       // Add ended event to automatically play next song
       player.addEventListener('ended', () => {
@@ -229,11 +261,26 @@ function App() {
     }
   }, []);
 
+  // Add helper function to open the HTTPS site to accept the certificate
+  const openSecureWebsite = () => {
+    const httpsUrl = `https://${serverAddress}:8443/`;
+    window.open(httpsUrl, '_blank');
+  };
+
   const handleAuth = (e: React.FormEvent) => {
     e.preventDefault();
-    if (socket) {
-      socket.send(`${credentials.username}:${credentials.password}`);
-    }
+    
+    // Connect to the server first
+    connectToServer();
+    
+    // Wait for connection before sending credentials
+    setTimeout(() => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(`${credentials.username}:${credentials.password}`);
+      } else {
+        console.error('Socket not ready when trying to authenticate');
+      }
+    }, 1000);
   };
 
   const handlePlaySong = (song: Song) => {
@@ -248,9 +295,6 @@ function App() {
       type: 'PLAY_SONG',
       name: song.name
     }));
-    
-    // Don't set isPlaying to true here, wait for the song to actually start playing
-    // The SONG_ENDED handler will set it when the audio is ready to play
   };
 
   const togglePlayPause = () => {
@@ -308,6 +352,10 @@ function App() {
     
     console.log(`Playing next song: ${songs[nextIndex].name}`);
   };
+  
+  const toggleSettings = () => {
+    setShowSettings(!showSettings);
+  };
 
   if (!isAuthenticated) {
     return (
@@ -317,7 +365,62 @@ function App() {
             <Music2 className="w-12 h-12 text-white" />
             <h1 className="text-3xl font-bold text-white ml-4">ByteBeats</h1>
           </div>
+          
+          {/* Connection guide */}
+          <div className="bg-white/5 p-4 rounded-lg mb-6">
+            <h2 className="text-white font-semibold mb-2">Secure Connection Guide</h2>
+            <ol className="text-purple-200 text-sm space-y-1 ml-4 list-decimal">
+              <li>Make sure both devices are on the same network or mobile hotspot</li>
+              <li>Enter the server device's IP address below</li>
+              <li>Choose whether to use secure connection (SSL)</li>
+              <li>Log in with your username and password</li>
+            </ol>
+          </div>
+
           <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="block text-white mb-2">Server Address</label>
+              <input
+                type="text"
+                value={serverAddress}
+                onChange={(e) => setServerAddress(e.target.value)}
+                placeholder="IP address (e.g. 172.20.10.9)"
+                className="w-full px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-white focus:outline-none focus:border-purple-500"
+              />
+              <p className="text-purple-300 text-xs mt-1">Use your server's IP address on the network</p>
+            </div>
+            
+            <div className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                id="useSSL"
+                checked={useSSL}
+                onChange={() => setUseSSL(!useSSL)}
+                className="w-4 h-4 accent-purple-500"
+              />
+              <label htmlFor="useSSL" className="text-white flex items-center">
+                <Shield className="w-4 h-4 mr-1 text-purple-300" />
+                Use secure connection (SSL)
+              </label>
+            </div>
+            
+            {useSSL && (
+              <div className="bg-purple-900/30 p-3 rounded-lg text-sm text-purple-200 flex items-start">
+                <Shield className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                <p>
+                  Using a self-signed certificate? You may need to{" "}
+                  <button 
+                    type="button"
+                    onClick={openSecureWebsite}
+                    className="text-purple-400 hover:text-white underline"
+                  >
+                    accept the certificate
+                  </button>{" "}
+                  in your browser first.
+                </p>
+              </div>
+            )}
+            
             <div>
               <label className="block text-white mb-2">Username</label>
               <input
@@ -336,11 +439,26 @@ function App() {
                 className="w-full px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-white focus:outline-none focus:border-purple-500"
               />
             </div>
+            
+            {connectionError && (
+              <div className="bg-red-500/20 text-red-200 p-3 rounded-lg text-sm">
+                {connectionError}
+              </div>
+            )}
+            
             <button
               type="submit"
-              className="w-full bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-lg transition"
+              disabled={isReconnecting}
+              className="w-full bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-lg transition flex items-center justify-center"
             >
-              Connect to Server
+              {isReconnecting ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  Connecting...
+                </>
+              ) : (
+                'Connect to Server'
+              )}
             </button>
           </form>
         </div>
@@ -357,12 +475,12 @@ function App() {
             <Music2 className="w-8 h-8 text-white" />
             <h1 className="text-2xl font-bold text-white ml-3">ByteBeats</h1>
           </div>
-          <div className="flex items-center">
+          <div className="flex items-center space-x-4">
             <span className="text-purple-300 flex items-center">
               {isConnected ? (
                 <>
                   <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-                  Connected to Server
+                  Connected to {serverAddress}
                 </>
               ) : (
                 <>
@@ -371,9 +489,55 @@ function App() {
                 </>
               )}
             </span>
+            <button 
+              onClick={toggleSettings} 
+              className="p-2 rounded-full hover:bg-white/10"
+            >
+              <Settings className="w-5 h-5 text-white" />
+            </button>
           </div>
         </div>
       </header>
+      
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/50">
+          <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-8 w-full max-w-md">
+            <h2 className="text-2xl font-bold text-white mb-6">Connection Settings</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-white mb-2">Server Address</label>
+                <div className="flex items-center">
+                  <input
+                    type="text"
+                    value={serverAddress}
+                    onChange={(e) => setServerAddress(e.target.value)}
+                    className="w-full px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-white focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+              <div className="pt-4 flex space-x-4 justify-end">
+                <button
+                  onClick={toggleSettings}
+                  className="px-6 py-2 bg-transparent hover:bg-white/10 text-white rounded-lg transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (socket) socket.close();
+                    connectToServer();
+                    toggleSettings();
+                  }}
+                  className="px-6 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition"
+                >
+                  Reconnect
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="container mx-auto px-6 py-8">

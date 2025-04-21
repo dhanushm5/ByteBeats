@@ -7,10 +7,11 @@ import threading
 import time
 import sys
 import signal
-import ssl
+import websocket
+import struct
 
 # Server configuration
-HOST = input("Enter server IP or hostname: ")  # Allow user to input server address
+HOST = input("Enter server IP address on the mobile hotspot: ")  # Allow user to input server address
 PORT = 8080  # Must match the server port
 
 # Global variables for playback control
@@ -22,34 +23,47 @@ stop_playback = False
 
 # Connect to the server
 def connect_to_server():
-    # Create SSL context
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE  # In production, use CERT_REQUIRED
+    # Create a WebSocket connection without SSL
+    ws_url = f"ws://{HOST}:{PORT}"
+    print(f"Connecting to {ws_url}...")
     
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    ssl_socket = context.wrap_socket(client_socket, server_hostname=HOST)
-    ssl_socket.connect((HOST, PORT))
-    
-    # Handle authentication
-    auth_response = ssl_socket.recv(1024).decode()
-    if auth_response == "AUTH_REQUIRED":
-        username = input("Username: ")
-        password = input("Password: ")
-        ssl_socket.send(f"{username}:{password}".encode())
-        
-        result = ssl_socket.recv(1024).decode()
-        if result == "AUTH_FAILED":
-            raise Exception("Authentication failed")
-    
-    print("Connected to server")
-    return ssl_socket
+    # Use the websocket-client library for better WebSocket support
+    try:
+        client_socket = websocket.create_connection(ws_url)
+        print("Connected to server")
+        return client_socket
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        raise
 
 # Get the list of available songs
 def get_song_list(client_socket):
-    songs_data = client_socket.recv(4096).decode()  # Increased buffer size
-    songs = json.loads(songs_data)
-    return songs
+    # Wait for the AUTH_REQUIRED message
+    try:
+        message = client_socket.recv()
+        data = json.loads(message)
+        if data.get("type") == "AUTH_REQUIRED":
+            username = input("Username: ")
+            password = input("Password: ")
+            client_socket.send(f"{username}:{password}")
+            
+            # Wait for authentication result
+            auth_result = client_socket.recv()
+            auth_data = json.loads(auth_result)
+            if auth_data.get("type") == "AUTH_FAILED":
+                raise Exception("Authentication failed")
+            elif auth_data.get("type") == "AUTH_SUCCESS":
+                print("Authentication successful")
+                return auth_data.get("songs", [])
+        else:
+            print(f"Unexpected message: {data}")
+            return []
+    except json.JSONDecodeError:
+        print(f"Error parsing server response")
+        return []
+    except Exception as e:
+        print(f"Error: {e}")
+        return []
 
 # Toggle pause/resume playback
 def toggle_pause():
@@ -150,72 +164,97 @@ def handle_controls():
         else:
             time.sleep(0.1)
 
+# Decode a WebSocket frame (needed for binary data)
+def parse_websocket_message(ws, binary=False):
+    try:
+        opcode, data = ws.recv_data()
+        return data
+    except Exception as e:
+        print(f"Error parsing WebSocket message: {e}")
+        return None
+
 # Stream and play the selected song
 def stream_song(client_socket, song_name):
     global stop_playback
     
-    client_socket.send(song_name.encode())
+    # Send a play request as JSON
+    play_request = json.dumps({
+        "type": "PLAY_SONG",
+        "name": song_name
+    })
+    client_socket.send(play_request)
     stop_playback = False
 
-    # Create buffer for smoother playback
-    buffer_size = 1024 * 1024  # 1MB buffer
-    audio_buffer = b''
-    
     # Create a temporary file to store the MP3
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
     temp_filename = temp_file.name
     
-    # Start buffering in a separate thread
-    def buffer_stream():
-        nonlocal audio_buffer
-        while True:
-            chunk = client_socket.recv(8192)  # Larger chunk for network
-            if not chunk:
-                break
-            audio_buffer += chunk
-            temp_file.write(chunk)
-            
-    buffer_thread = threading.Thread(target=buffer_stream)
-    buffer_thread.daemon = True
-    buffer_thread.start()
-    
-    # Wait for initial buffer to fill
-    print("Buffering...", end='')
-    while len(audio_buffer) < buffer_size and buffer_thread.is_alive():
-        print(".", end='')
-        time.sleep(0.5)
-    print("\nStarting playback!")
-    
-    # Start playback in a separate thread
-    playback_thread = threading.Thread(target=play_music, args=(temp_filename, song_name))
-    playback_thread.daemon = True
-    playback_thread.start()
-    
-    # Handle controls in the main thread
-    handle_controls()
-    
-    # Wait for playback to finish
-    playback_thread.join()
+    # Variables to track download progress
+    bytes_received = 0
+    song_size = None
+    receiving_data = False
     
     try:
-        bytes_received = 0
+        print("Waiting for song data...")
         while True:
-            chunk = client_socket.recv(4096)  # Increased buffer size
-            if not chunk:
-                break
-            temp_file.write(chunk)
-            bytes_received += len(chunk)
-            print(f"Received {bytes_received} bytes", end='\r')
-        
-        temp_file.close()
-        print(f"\nDownloaded {bytes_received} bytes of audio data")
-        
+            # Receive WebSocket message
+            message = client_socket.recv()
+            
+            # If it's binary data (likely audio chunks)
+            if isinstance(message, bytes):
+                temp_file.write(message)
+                bytes_received += len(message)
+                if song_size:
+                    progress = (bytes_received / song_size) * 100
+                    print(f"Received: {bytes_received / (1024*1024):.2f} MB ({progress:.1f}%)", end='\r')
+                else:
+                    print(f"Received: {bytes_received / 1024:.0f} KB", end='\r')
+                continue
+                
+            # Try to parse as JSON for control messages
+            try:
+                data = json.loads(message)
+                message_type = data.get("type")
+                
+                if message_type == "SONG_METADATA":
+                    song_size = data.get("size", 0)
+                    print(f"\nSong: {data.get('name')}, Size: {song_size / (1024*1024):.2f} MB")
+                
+                elif message_type == "SONG_PLAYING":
+                    print(f"Server started streaming: {data.get('name')}")
+                    receiving_data = True
+                
+                elif message_type == "SONG_ENDED":
+                    print(f"\nFinished receiving song data: {bytes_received} bytes")
+                    receiving_data = False
+                    temp_file.close()
+                    
+                    # Start playback in a separate thread
+                    playback_thread = threading.Thread(target=play_music, args=(temp_filename, song_name))
+                    playback_thread.daemon = True
+                    playback_thread.start()
+                    
+                    # Handle controls in the main thread
+                    handle_controls()
+                    
+                    # Wait for playback to finish
+                    playback_thread.join()
+                    return
+                    
+                elif message_type == "STREAM_ERROR":
+                    print(f"\nError streaming song: {data.get('error')}")
+                    return
+            
+            except json.JSONDecodeError:
+                print(f"Received non-JSON message: {message[:50]}...")
+    
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\nError during streaming: {e}")
     finally:
         # Clean up the temporary file
         try:
-            os.unlink(temp_filename)
+            if os.path.exists(temp_filename):
+                os.unlink(temp_filename)
         except:
             pass
 
@@ -223,6 +262,11 @@ def stream_song(client_socket, song_name):
 def main():
     try:
         print("Welcome to ByteBeats Music Player")
+        print("----------------------------------")
+        print("To connect devices over a mobile hotspot:")
+        print("1. Make sure both devices are connected to the same mobile hotspot")
+        print("2. Find the server's IP address on the mobile hotspot network")
+        print("3. Enter that IP address when prompted below")
         print("----------------------------------")
         
         while True:
